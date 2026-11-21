@@ -1,5 +1,10 @@
+import json
 import torch
 from prompts import build_messages, render
+
+def load_rows(path):
+    with open(path) as f:
+        return [(r["id"], r["text"], r["label"]) for r in map(json.loads, f)]
 
 @torch.no_grad()
 def score_one(tok, model, ids, text):

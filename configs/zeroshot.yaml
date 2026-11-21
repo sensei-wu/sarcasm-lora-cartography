@@ -1,0 +1,9 @@
+run_name: zeroshot
+model_id: Qwen/Qwen3.5-2B
+adapter: null
+results_root: /workspace/results
+batch_size: 32
+splits:
+  val: /workspace/data/processed/val.jsonl
+  test: /workspace/data/processed/test.jsonl
+  isarcasm_test: /workspace/data/processed/isarcasm_test.jsonl

@@ -1,13 +1,7 @@
 import time
 import torch
 from modeling import load_model
-from scoring import score_batch
-
-import json
-
-def load_rows(path):
-    with open(path) as f:
-        return [(r["id"], r["text"], r["label"]) for r in map(json.loads, f)]
+from scoring import score_batch, load_rows
 
 rows = load_rows("/workspace/data/processed/test.jsonl")[:64]
 
