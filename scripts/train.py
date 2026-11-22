@@ -1,7 +1,7 @@
 """LoRA trainer for the sarcasm classifier. One script covers every training box in the diagram:
 
-    phase1_map   full train split, log P(gold) on every train example after each epoch
-    gonogo       random 10% of train (sanity check that LoRA beats the baselines at all)
+    phase1_map   full train split, adapter saved after each epoch (data map scored afterwards)
+    random10     random 10% of train (sanity check that LoRA beats the baselines at all)
     phase2       data-map subset (easy / ambiguous / hard) + random control, 2-3 seeds
 
 Usage:  python scripts/train.py configs/<run>.yaml [--limit N]
@@ -9,34 +9,36 @@ Usage:  python scripts/train.py configs/<run>.yaml [--limit N]
 The trainer only trains and saves. Test-set metrics come from the shared evaluator
 (scripts/evaluate.py) pointed at the saved adapter, so every run is scored identically.
 
-Outputs under {results_root}/{run_name}/:
+Outputs under {adapters_root}/{run_name}/ (separate from evaluate.py's results_root, so the
+two scripts never claim the same folder):
     config.yaml            copy of the config
-    adapter/               final LoRA adapter (PeftModel.from_pretrained-able)
+    epoch{N}/              LoRA adapter after each epoch (PeftModel.from_pretrained-able)
     train_log.jsonl        one row per epoch: train loss, val acc
-    map_log.jsonl          phase1 only: {"epoch", "id", "gold", "p_gold"} per train example
-    selected_ids.json      ids actually trained on (for audit)
+    selected_ids.json     ids actually trained on (for audit)
 """
 
 import argparse
 import json
+import math
 import random
 import shutil
+import time
 from pathlib import Path
 
 import torch
 import yaml
+from transformers import get_linear_schedule_with_warmup
 
 from modeling import load_model
 from prompts import build_messages, render
 from scoring import load_rows, score_batch
 
-# Config keys (see configs/train_gonogo.yaml):
-#   run_name, model_id, results_root, batch_size
+# Config keys (see configs/train_random10.yaml):
+#   run_name, model_id, adapters_root, batch_size
 #   train: path to train.jsonl, val: path to val.jsonl
-#   seed, epochs, lr, train_batch_size, grad_accum
+#   seed, epochs, lr, train_batch_size
 #   lora: {r, alpha, dropout, target_modules}
-#   subset: {kind: all|random|easy|ambiguous|hard, fraction, map_path, plus_random}
-#   log_map: bool   (phase 1 only)
+#   subset: {kind: all|random|easy|ambiguous|hard, fraction, map_path}
 
 
 # ---------------------------------------------------------------- reproducibility
@@ -51,10 +53,9 @@ def select_subset(rows, subset_cfg, seed):
     """Return the rows to train on.
 
     kind=all        every row (phase 1)
-    kind=random     `fraction` of rows, sampled with `seed` (go/no-go and phase 2 control)
+    kind=random     `fraction` of rows, sampled with `seed` (random10 and phase 2 control)
     kind=easy|ambiguous|hard
-                    ids from the data map at `map_path`, plus `plus_random` extra random
-                    rows from outside that subset (diagram: "+ random")
+                    ids from the data map at `map_path`
     """
     kind = subset_cfg["kind"]
     if kind == "all":
@@ -63,8 +64,7 @@ def select_subset(rows, subset_cfg, seed):
         rng = random.Random(seed)
         k = round(len(rows) * subset_cfg["fraction"])
         return rng.sample(rows, k)
-    # TODO: load map_path (output of the cartography analysis step), take the ids for
-    # `kind`, then add `plus_random` rows drawn with Random(seed) from the remainder.
+    # TODO: load the ids for `kind` from map_path.
     raise NotImplementedError(f"subset kind {kind!r}")
 
 
@@ -92,41 +92,37 @@ def make_batch(tok, ids, chunk):
     label-token ids as targets."""
     prompts = [render(tok, build_messages(text)) for _, text, _ in chunk]
     enc = tok(prompts, return_tensors="pt", padding=True, add_special_tokens=False)
-    # TODO: map gold (1/0) -> ids["Yes"] / ids["No"]
     targets = torch.tensor([ids["Yes"] if gold == 1 else ids["No"] for _, _, gold in chunk])
     return enc, targets
 
 
-def label_loss(logits_last, targets, ids):
-    """Cross-entropy at the label slot.
-
-    TODO: decide between full-vocab CE and CE restricted to the [Yes, No] pair. The
-    evaluator reads the 2-way softmax, so restricting matches it; full-vocab also
-    trains the model to put mass on the label tokens (the `mass` metric).
-    """
+def label_loss(logits_last, targets):
+    """Full-vocabulary cross-entropy at the label slot (decided 22 Nov); float32 for numerical stability."""
     return torch.nn.functional.cross_entropy(logits_last.float(), targets)
 
 
 # ---------------------------------------------------------------- training loop
-def train_epoch(tok, model, ids, rows, optimizer, cfg, rng):
+def train_epoch(tok, model, ids, rows, optimizer, scheduler, trainable, cfg, rng, epoch):
     model.train()
     rows = rows[:]
     rng.shuffle(rows)
-    bs, accum = cfg["train_batch_size"], cfg["grad_accum"]
-    total, steps = 0.0, 0
-    optimizer.zero_grad()
-    for i, start in enumerate(range(0, len(rows), bs)):
+    bs = cfg["train_batch_size"]
+    total, steps, t0 = 0.0, 0, time.time()
+    for start in range(0, len(rows), bs):
         enc, targets = make_batch(tok, ids, rows[start:start + bs])
         enc, targets = enc.to(model.device), targets.to(model.device)
         logits = model(**enc).logits[:, -1]
-        loss = label_loss(logits, targets, ids) / accum
+        loss = label_loss(logits, targets)
+        optimizer.zero_grad()
         loss.backward()
-        total += loss.item() * accum
-        steps += 1
-        if (i + 1) % accum == 0:
-            optimizer.step()
-            optimizer.zero_grad()
-    # TODO: flush the last partial accumulation; add LR schedule / grad clipping if wanted
+        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+        optimizer.step()
+        scheduler.step()
+        total += loss.item(); steps += 1
+        if steps % 10 == 0:
+            print(f"epoch {epoch} step {steps}/{math.ceil(len(rows)/bs)} "
+                  f"loss {loss.item():.4f} lr {scheduler.get_last_lr()[0]:.2e} "
+                  f"{(time.time()-t0)/steps:.2f}s/step", flush=True)
     return total / max(steps, 1)
 
 
@@ -136,17 +132,6 @@ def eval_split(tok, model, ids, rows, batch_size):
     model.eval()
     res = score_batch(tok, model, ids, rows, batch_size=batch_size)
     return sum(r["pred"] == r["gold"] for r in res) / len(res)
-
-
-@torch.no_grad()
-def log_map_epoch(tok, model, ids, rows, batch_size, epoch, f):
-    """Phase 1: P(gold) for every train example, written as one jsonl row each."""
-    model.eval()
-    res = score_batch(tok, model, ids, rows, batch_size=batch_size)
-    for r in res:
-        f.write(json.dumps({"epoch": epoch, "id": r["id"], "gold": r["gold"],
-                            "p_gold": r["p_gold"]}) + "\n")
-    f.flush()
 
 
 # ---------------------------------------------------------------- main
@@ -160,7 +145,7 @@ def main():
         cfg = yaml.safe_load(f)
 
     run_name = cfg["run_name"] + (f"_limit{args.limit}" if args.limit else "")
-    out_dir = Path(cfg["results_root"]) / run_name
+    out_dir = Path(cfg["adapters_root"]) / run_name
     out_dir.mkdir(parents=True, exist_ok=False)
     shutil.copy(args.config, out_dir / "config.yaml")
 
@@ -169,39 +154,36 @@ def main():
 
     train_all = load_rows(cfg["train"])
     val_rows = load_rows(cfg["val"])
-    if args.limit:
-        train_all, val_rows = train_all[:args.limit], val_rows[:args.limit]
 
-    # Selection is applied to the full train split; the map log (phase 1) always uses
-    # kind=all, so its ids cover the whole split.
+    # Selection is applied to the full train split; the mapping run uses kind=all,
+    # so its ids cover the whole split. --limit (smoke test) cuts the selected
+    # list afterwards, so the subset draw is not shrunk by it.
     train_rows = select_subset(train_all, cfg["subset"], cfg["seed"])
+    if args.limit:
+        train_rows, val_rows = train_rows[:args.limit], val_rows[:args.limit]
     (out_dir / "selected_ids.json").write_text(json.dumps([r[0] for r in train_rows]))
     print(f"training on {len(train_rows)} / {len(train_all)} rows")
 
     tok, model, ids = load_model(cfg["model_id"])
     model = add_lora(model, cfg["lora"])
-    optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad], lr=cfg["lr"]
-    )
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable, lr=cfg["lr"])
+    steps_per_epoch = math.ceil(len(train_rows) / cfg["train_batch_size"])
+    total_steps = steps_per_epoch * cfg["epochs"]
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=round(0.05 * total_steps), num_training_steps=total_steps)
 
-    map_f = open(out_dir / "map_log.jsonl", "w") if cfg.get("log_map") else None
     with open(out_dir / "train_log.jsonl", "w") as log_f:
         for epoch in range(1, cfg["epochs"] + 1):
-            train_loss = train_epoch(tok, model, ids, train_rows, optimizer, cfg, rng)
+            train_loss = train_epoch(tok, model, ids, train_rows, optimizer, scheduler,
+                                     trainable, cfg, rng, epoch)
             val_acc = eval_split(tok, model, ids, val_rows, cfg["batch_size"])
             row = {"epoch": epoch, "train_loss": train_loss, "val_acc": val_acc}
             log_f.write(json.dumps(row) + "\n")
             log_f.flush()
             print(row)
-            if map_f:
-                log_map_epoch(tok, model, ids, train_rows, cfg["batch_size"], epoch, map_f)
-    if map_f:
-        map_f.close()
-
-    model.save_pretrained(out_dir / "adapter")
-    print(f"saved adapter to {out_dir / 'adapter'}")
-    print("evaluate with: set `adapter` in an evaluate config to this path "
-          "and run scripts/evaluate.py")
+            model.save_pretrained(out_dir / f"epoch{epoch}")
+    print(f"adapters saved under {out_dir}")
 
 
 if __name__ == "__main__":

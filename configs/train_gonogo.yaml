@@ -1,6 +1,6 @@
 run_name: gonogo_random10_s0
 model_id: Qwen/Qwen3.5-2B
-results_root: /workspace/results
+adapters_root: /workspace/adapters   # trained adapters; evaluate.py results go to results_root
 batch_size: 32            # scoring batch size (val / map logging)
 
 train: /workspace/data/processed/train.jsonl
