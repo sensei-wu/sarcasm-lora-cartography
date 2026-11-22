@@ -1,0 +1,27 @@
+run_name: gonogo_random10_s0
+model_id: Qwen/Qwen3.5-2B
+results_root: /workspace/results
+batch_size: 32            # scoring batch size (val / map logging)
+
+train: /workspace/data/processed/train.jsonl
+val: /workspace/data/processed/val.jsonl
+
+seed: 0
+epochs: 3
+lr: 1.0e-4
+train_batch_size: 8
+grad_accum: 4
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+subset:
+  kind: random            # all | random | easy | ambiguous | hard
+  fraction: 0.10
+  # map_path: /workspace/results/phase1_map/data_map.jsonl   (easy/ambiguous/hard)
+  # plus_random: 0
+
+log_map: false            # true only for the phase 1 mapping run (kind: all)
