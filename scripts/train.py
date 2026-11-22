@@ -102,11 +102,14 @@ def label_loss(logits_last, targets):
 
 
 # ---------------------------------------------------------------- training loop
-def train_epoch(tok, model, ids, rows, optimizer, scheduler, trainable, cfg, rng, epoch):
+def train_epoch(tok, model, ids, rows, optimizer, scheduler, trainable, cfg, rng, epoch, out_dir):  # NEW: out_dir
     model.train()
     rows = rows[:]
     rng.shuffle(rows)
     bs = cfg["train_batch_size"]
+    n_steps = math.ceil(len(rows) / bs)                                   # NEW
+    k = cfg.get("saves_per_epoch", 1)                                     # NEW
+    save_at = {round(i * n_steps / k): i for i in range(1, k)}            # NEW
     total, steps, t0 = 0.0, 0, time.time()
     for start in range(0, len(rows), bs):
         enc, targets = make_batch(tok, ids, rows[start:start + bs])
@@ -119,8 +122,10 @@ def train_epoch(tok, model, ids, rows, optimizer, scheduler, trainable, cfg, rng
         optimizer.step()
         scheduler.step()
         total += loss.item(); steps += 1
+        if steps in save_at:                                              # NEW
+            model.save_pretrained(out_dir / f"epoch{epoch}_q{save_at[steps]}")  # NEW
         if steps % 10 == 0:
-            print(f"epoch {epoch} step {steps}/{math.ceil(len(rows)/bs)} "
+            print(f"epoch {epoch} step {steps}/{n_steps} "
                   f"loss {loss.item():.4f} lr {scheduler.get_last_lr()[0]:.2e} "
                   f"{(time.time()-t0)/steps:.2f}s/step", flush=True)
     return total / max(steps, 1)
@@ -176,7 +181,7 @@ def main():
     with open(out_dir / "train_log.jsonl", "w") as log_f:
         for epoch in range(1, cfg["epochs"] + 1):
             train_loss = train_epoch(tok, model, ids, train_rows, optimizer, scheduler,
-                                     trainable, cfg, rng, epoch)
+                                     trainable, cfg, rng, epoch, out_dir)
             val_acc = eval_split(tok, model, ids, val_rows, cfg["batch_size"])
             row = {"epoch": epoch, "train_loss": train_loss, "val_acc": val_acc}
             log_f.write(json.dumps(row) + "\n")
