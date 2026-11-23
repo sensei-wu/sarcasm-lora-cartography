@@ -2,5 +2,5 @@
 {"id": "b", "gold": 1, "pred": 1}
 {"id": "c", "gold": 1, "pred": 0}
 {"id": "d", "gold": 0, "pred": 1}
-{"id": "e", "gold": 0, "pred": 0}
+{"id": "e", "gold": 0, "pred": 1}
 {"id": "f", "gold": 0, "pred": 0}
