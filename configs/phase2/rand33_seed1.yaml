@@ -1,0 +1,12 @@
+run_name: rand33_seed1
+model_id: Qwen/Qwen3.5-2B
+adapters_root: /workspace/adapters
+train: /workspace/data/processed/train.jsonl
+val: /workspace/data/processed/val.jsonl
+batch_size: 32
+seed: 1
+epochs: 2
+lr: 2.0e-4
+train_batch_size: 16
+lora: {r: 16, alpha: 32, dropout: 0.05, target_modules: all-linear}
+subset: {kind: random, fraction: 0.33}

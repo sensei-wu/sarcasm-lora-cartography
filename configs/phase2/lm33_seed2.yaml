@@ -1,0 +1,12 @@
+run_name: lm33_seed2
+model_id: Qwen/Qwen3.5-2B
+adapters_root: /workspace/adapters
+train: /workspace/data/processed/train.jsonl
+val: /workspace/data/processed/val.jsonl
+batch_size: 32
+seed: 2
+epochs: 2
+lr: 2.0e-4
+train_batch_size: 16
+lora: {r: 16, alpha: 32, dropout: 0.05, target_modules: all-linear}
+subset: {kind: ids, ids_path: /workspace/results/cartography_map_all_seed1/frac33/label_matched_seed2_ids.txt}

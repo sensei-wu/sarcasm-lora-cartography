@@ -1,0 +1,7 @@
+run_name: map_all_seed1_train_epoch2
+model_id: Qwen/Qwen3.5-2B
+adapter: /workspace/adapters/map_all_seed1/epoch2
+results_root: /workspace/results
+batch_size: 32
+splits:
+  train: /workspace/data/processed/train.jsonl

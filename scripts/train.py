@@ -54,8 +54,7 @@ def select_subset(rows, subset_cfg, seed):
 
     kind=all        every row (phase 1)
     kind=random     `fraction` of rows, sampled with `seed` (random10 and phase 2 control)
-    kind=easy|ambiguous|hard
-                    ids from the data map at `map_path`
+    kind=ids        exactly the ids listed in `ids_path` (one per line; phase 2 map subsets)
     """
     kind = subset_cfg["kind"]
     if kind == "all":
@@ -64,7 +63,11 @@ def select_subset(rows, subset_cfg, seed):
         rng = random.Random(seed)
         k = round(len(rows) * subset_cfg["fraction"])
         return rng.sample(rows, k)
-    # TODO: load the ids for `kind` from map_path.
+    if kind == "ids":
+        wanted = set(Path(subset_cfg["ids_path"]).read_text().split())
+        chosen = [r for r in rows if r[0] in wanted]
+        assert len(chosen) == len(wanted), f"{len(wanted) - len(chosen)} ids not found in train"
+        return chosen
     raise NotImplementedError(f"subset kind {kind!r}")
 
 
